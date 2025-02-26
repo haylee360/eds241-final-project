@@ -1,0 +1,163 @@
+---
+title: "Data check"
+---
+
+```{r}
+library(haven)
+library(tidyverse)
+library(readtext)
+library(here)
+```
+
+```{r}
+# Read the Stata .dta file
+data <- read_dta(here("data", "rawraindata", "Station_Indonesia.dta")
+
+# Save as CSV
+write.csv(data, "output_file.csv", row.names = FALSE)
+```
+
+```{r}
+# Read the Stata .do file
+do_file <- readtext(here("data", "raindata_qtr_annual", "annualraindata_maker.do"))
+
+# View content
+print(do_file)
+```
+
+```{r}
+# install.packages(c("haven", "dplyr", "ggplot2", "readr", "lfe", "plm"))
+library(haven)   # For reading .dta files
+library(dplyr)   # Data wrangling
+library(ggplot2) # Visualization
+library(readr)   # Reading and writing data
+library(lfe)     # For IV regressions (similar to Stata's ivreg)
+library(plm)     # Panel data analysis
+```
+
+## Processing rainfall data
+```{r}
+# Load IFLS3 dataset
+ifls3 <- read_dta("data/IFLS3.dta")
+
+# Load district and station location data
+districts <- read_dta("data/rawraindata/District_Indonesia.dta")
+stations <- read_dta("data/rawraindata/Station_Indonesia.dta")
+
+# Load rainfall norms dataset
+district_norms <- read_dta("data/rawraindata/districtnorms_nobirthyear.dta")
+
+```
+
+```{r}
+# Assuming raw rainfall data is in a CSV file, load it
+rainfall <- read_csv("data/rawraindata/Monthly_RainShock_Indonesia_long.csv")
+
+# Process rainfall data (example transformation)
+rainfall_processed <- rainfall %>%
+  group_by(Year, District) %>%
+  summarize(average_rainfall = mean(Rainfall, na.rm = TRUE))
+
+# Save processed data
+write_csv(rainfall_processed, "data/processed_rainfall.csv")
+
+```
+
+## Linking rainfall to districts
+```{r}
+# Merge processed rainfall data with IFLS district data
+ifls3 <- ifls3 %>%
+  left_join(districts, by = "district_code") %>%
+  left_join(rainfall_processed, by = c("district_code" = "District"))
+
+# Save the merged dataset
+write_csv(ifls3, "data/ifls3_with_rainfall.csv")
+
+```
+
+## Empirical analysis
+Regression dataset
+```{r}
+setwd("analysis")
+
+# Load processed dataset
+reg_data <- read_dta("data/ifls3_with_rainfall.dta")
+
+# Create new variables
+reg_data <- reg_data %>%
+  mutate(
+    rainfall_shock = ifelse(average_rainfall > quantile(average_rainfall, 0.75), 1, 0),
+    birth_cohort = as.numeric(year_of_birth)
+  )
+
+# Save final dataset
+write_csv(reg_data, "analysis/regdata.csv")
+
+```
+
+```{r}
+female_data <- reg_data %>% filter(gender == "female")
+male_data <- reg_data %>% filter(gender == "male")
+
+write_csv(female_data, "analysis/female.csv")
+write_csv(male_data, "analysis/male.csv")
+
+```
+
+## Running regression analysis
+
+```{r}
+summary_stats <- reg_data %>%
+  summarise(
+    mean_age = mean(age, na.rm = TRUE),
+    mean_education = mean(education_years, na.rm = TRUE),
+    mean_height = mean(height_cm, na.rm = TRUE)
+  )
+print(summary_stats)
+
+```
+
+## first stage regression
+```{r}
+first_stage <- lm(rainfall_shock ~ birth_cohort, data = reg_data)
+summary(first_stage)
+
+```
+
+## IV
+```{r}
+iv_model <- felm(education_years ~ rainfall_shock | 0 | (rainfall_shock ~ birth_cohort), data = reg_data)
+summary(iv_model)
+```
+
+## OLS regression
+```{r}
+ols_model <- lm(education_years ~ rainfall_shock, data = reg_data)
+summary(ols_model)
+
+```
+
+## Additionally analyses
+```{r}
+
+# Parental characteristics (`parent.do`)
+parent_model <- lm(parent_education ~ rainfall_shock, data = reg_data)
+summary(parent_model)
+
+# Urban Sample (`main_urban.do`)
+urban_data <- reg_data %>% filter(urban == 1)
+urban_model <- lm(education_years ~ rainfall_shock, data = urban_data)
+summary(urban_model)
+
+```
+
+## Non parametric plots
+```{r}
+ggplot(reg_data, aes(x = rainfall_shock, y = education_years)) +
+  geom_smooth(method = "loess") +
+  labs(title = "Rainfall Shock vs. Education", x = "Rainfall Shock", y = "Years of Education")
+
+```
+
+
+
