@@ -1,65 +1,61 @@
 ---
 title: "Data check"
+author: "Haylee Oyler"
+format: html
+execute:
+  warning: false
+  message: false
 ---
 
 ```{r}
+#| code-fold: true
+#| code-summary: "Load libraries"
+
 library(haven)
 library(tidyverse)
 library(readtext)
 library(here)
-```
-
-```{r}
-# Read the Stata .dta file
-data <- read_dta(here("data", "rawraindata", "Station_Indonesia.dta")
-
-# Save as CSV
-write.csv(data, "output_file.csv", row.names = FALSE)
-```
-
-```{r}
-# Read the Stata .do file
-do_file <- readtext(here("data", "raindata_qtr_annual", "annualraindata_maker.do"))
-
-# View content
-print(do_file)
-```
-
-```{r}
-# install.packages(c("haven", "dplyr", "ggplot2", "readr", "lfe", "plm"))
-library(haven)   # For reading .dta files
-library(dplyr)   # Data wrangling
-library(ggplot2) # Visualization
+library(AER)
+library(fixest)
+library(stargazer)
 library(readr)   # Reading and writing data
 library(lfe)     # For IV regressions (similar to Stata's ivreg)
 library(plm)     # Panel data analysis
 ```
 
-## Processing rainfall data
 ```{r}
+# Read stations and districts data
+stations <- read_dta(here("data", "rawraindata", "Station_Indonesia.dta"))
+districts <- read_dta(here("data", "rawraindata", "District_Indonesia.dta"))
+district_norms <- read_dta(here("data", "rawraindata", "districtnorms_nobirthyear.dta"))
+district_geocodes <- read_dta(here("data", "district_codes", "geocodes_distr.dta"))
+enum_areas <- read_dta(here("data", "district_codes", "enumerationareas", "enumerationareas93_99.dta"))
+
+
 # Load IFLS3 dataset
 ifls3 <- read_dta("data/IFLS3.dta")
 
-# Load district and station location data
-districts <- read_dta("data/rawraindata/District_Indonesia.dta")
-stations <- read_dta("data/rawraindata/Station_Indonesia.dta")
-
-# Load rainfall norms dataset
-district_norms <- read_dta("data/rawraindata/districtnorms_nobirthyear.dta")
+# Load simulated rain data
+rainfall <- read_csv(here("data", "Simulated_Data_MakeItRain.csv"))
 
 ```
 
+
+
+## Processing rainfall data
+
+
 ```{r}
 # Assuming raw rainfall data is in a CSV file, load it
-rainfall <- read_csv("data/rawraindata/Monthly_RainShock_Indonesia_long.csv")
+# rainfall <- read_csv("data/rawraindata/Monthly_RainShock_Indonesia_long.csv")
 
 # Process rainfall data (example transformation)
-rainfall_processed <- rainfall %>%
-  group_by(Year, District) %>%
-  summarize(average_rainfall = mean(Rainfall, na.rm = TRUE))
+# rainfall_processed <- rainfall %>%
+#   group_by(birth_year, district_id) %>%
+#   summarize(average_rainfall = mean(c(rain_closest, rain_2nd, rain_3rd, rain_4th, rain_5th), na.rm = TRUE))
 
 # Save processed data
-write_csv(rainfall_processed, "data/processed_rainfall.csv")
+# write_csv(rainfall_processed, "data/processed_rainfall.csv")
 
 ```
 
@@ -77,34 +73,128 @@ write_csv(ifls3, "data/ifls3_with_rainfall.csv")
 
 ## Empirical analysis
 Regression dataset
+
 ```{r}
-setwd("analysis")
+# Find district average rainfall for entire time period and log it
+rainfall <- rainfall %>%
+  group_by(district_id) %>% 
+  mutate(avg_dist_rainfall = mean(rain_closest)) %>% 
+  ungroup() %>% 
+  # Also need to shift average rainfall to log transform it 
+  mutate(avg_dist_rainfall = avg_dist_rainfall + abs(min(avg_dist_rainfall)),
+         lavg_dist_rainfall = log(avg_dist_rainfall))
 
-# Load processed dataset
-reg_data <- read_dta("data/ifls3_with_rainfall.dta")
+```
 
-# Create new variables
-reg_data <- reg_data %>%
-  mutate(
-    rainfall_shock = ifelse(average_rainfall > quantile(average_rainfall, 0.75), 1, 0),
-    birth_cohort = as.numeric(year_of_birth)
+```{r}
+# List of columns to loop through
+rainfall_columns <- c("rain_closest", "rain_2nd", "rain_3rd", "rain_4th", "rain_5th")
+
+for (col in rainfall_columns){
+  # Shift all values by their minimum so we can log transform later
+  rainfall[paste0("shift_", col)] = rainfall[col] + abs(min(rainfall[col]))
+  
+  # Apply log transformation
+  rainfall[paste0("lshift_", col)] = log(rainfall[paste0("shift_", col)])
+  
+  # Difference in log district rainfall from mean district rainfall
+  rainfall[paste0("ldev_", col)] = rainfall[paste0("lshift_", col)] - rainfall['lavg_dist_rainfall']
+
+}
+
+```
+
+```{r}
+first_stage <- feols(height ~ ldev_rain_2nd + ldev_rain_3rd + ldev_rain_4th + ldev_rain_5th + district_id * season + birth_year * season,
+                     cluster = ~province, 
+                     data = rainfall)
+
+summary(first_stage)
+
+first_stage <- feols(height ~ ldev_rain_2nd + ldev_rain_3rd + ldev_rain_4th + ldev_rain_5th | district_id + season + birth_year | ldev_rain_closest ~ ldev_rain_2nd + ldev_rain_3rd + ldev_rain_4th + ldev_rain_5th,
+                     cluster = ~province, 
+                     data = rainfall)
+
+summary(first_stage)
+```
+
+
+```{r}
+female_data <- rainfall %>% filter(female == 1)
+male_data <- rainfall %>% filter(female == 0)
+
+first_stage_female <- feols(height ~ ldev_rain_2nd + ldev_rain_3rd + ldev_rain_4th + ldev_rain_5th + district_id*season + birth_year*season,
+                     cluster = ~province, 
+                     data = female_data)
+
+summary(first_stage_female)
+
+first_stage_male <- feols(height ~ ldev_rain_2nd + ldev_rain_3rd + ldev_rain_4th + ldev_rain_5th + district_id*season + birth_year*season,
+                     cluster = ~province, 
+                     data = male_data)
+
+summary(first_stage_male)
+
+```
+
+## Running regression analysis for women
+
+```{r}
+first_stage_w <- lm(rainfall_shock ~ birth_cohort, data = rainfall)
+summary(first_stage)
+```
+
+
+```{r}
+# Load necessary libraries
+library(fixest)
+library(dplyr)
+library(stargazer)  # For output formatting
+library(modelsummary)
+
+# Function to run regression and export results
+run_regression <- function(data, outcome, filename) {
+
+  # Regression without fixed effects
+  reg1 <- feols(
+    as.formula(paste(outcome, "~ ldevrain0_far2 + ldevrain0_far3 + ldevrain0_far4 + ldevrain0_far5")),
+    data = data
   )
 
-# Save final dataset
-write_csv(reg_data, "analysis/regdata.csv")
+  # Regression with fixed effects and clustering
+  reg2 <- feols(
+    as.formula(paste(outcome, "~ ldevrain0_far2 + ldevrain0_far3 + ldevrain0_far4 + ldevrain0_far5 | district_season + year_season")),
+    cluster = ~prov,
+    data = data
+  )
+
+  # Regression with multiple lag/lead rainfall variables
+  reg3 <- feols(
+    as.formula(paste(outcome, "~ ldevrain0_far2 + ldevrain0_far3 + ldevrain0_far4 + ldevrain0_far5 + 
+                              ldevrain1_far2 + ldevrain1_far3 + ldevrain1_far4 + ldevrain1_far5 + 
+                              ldevrain2_far2 + ldevrain2_far3 + ldevrain2_far4 + ldevrain2_far5 + 
+                              ldevrain_1_far2 + ldevrain_1_far3 + ldevrain_1_far4 + ldevrain_1_far5 + 
+                              ldevrain_2_far2 + ldevrain_2_far3 + ldevrain_2_far4 + ldevrain_2_far5 | 
+                              district_season + year_season")),
+    cluster = ~prov,
+    data = data
+  )
+
+  # Save results
+  stargazer(reg1, reg2, reg3, type = "text", out = paste0(filename, ".txt"))
+}
+
+# Load and run for FEMALES
+female_data <- read.csv("female.csv")  # Adjust file path as needed
+run_regression(female_data, "X", "firststage_female")
+
+# Load and run for MALES
+male_data <- read.csv("male.csv")  # Adjust file path as needed
+run_regression(male_data, "X", "firststage_male")
 
 ```
 
-```{r}
-female_data <- reg_data %>% filter(gender == "female")
-male_data <- reg_data %>% filter(gender == "male")
 
-write_csv(female_data, "analysis/female.csv")
-write_csv(male_data, "analysis/male.csv")
-
-```
-
-## Running regression analysis
 
 ```{r}
 summary_stats <- reg_data %>%
